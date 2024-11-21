@@ -68,7 +68,7 @@ echo -e "\n--- Installing required packages ---"
 sudo apt install -y git build-essential wget \
 libxslt-dev libzip-dev libldap2-dev libsasl2-dev nodejs npm libjpeg-dev zlib1g-dev \
 libfreetype6-dev liblcms2-dev libwebp-dev libharfbuzz-dev libfribidi-dev libxcb1-dev \
-libpq-dev
+libpq-dev libssl-dev libffi-dev
 
 echo -e "\n---- Installing nodeJS NPM and rtlcss ----"
 sudo npm install -g rtlcss
@@ -119,10 +119,22 @@ sudo -u "$OE_USER" git clone --depth 1 --branch "$OE_VERSION" https://github.com
 echo -e "\n---- Create virtual environment ----"
 sudo -u "$OE_USER" python3.10 -m venv "$OE_HOME/venv"
 
-echo -e "\n---- Install python packages/requirements ----"
-sudo -u "$OE_USER" "$OE_HOME/venv/bin/pip" install --upgrade pip
-sudo -u "$OE_USER" "$OE_HOME/venv/bin/pip" install wheel
+echo -e "\n---- Upgrade pip, setuptools, wheel, and cython ----"
+sudo -u "$OE_USER" "$OE_HOME/venv/bin/pip" install --upgrade pip setuptools wheel cython
+
+echo -e "\n---- Install compatible versions of gevent and greenlet ----"
+sudo -u "$OE_USER" "$OE_HOME/venv/bin/pip" install gevent==22.10.2 greenlet==2.0.2
+
+echo -e "\n---- Install remaining python packages/requirements ----"
+# Copy the requirements.txt to a temporary file
+sudo -u "$OE_USER" cp "$OE_HOME_EXT/requirements.txt" "$OE_HOME_EXT/requirements.txt.bak"
+# Remove gevent and greenlet entries
+sudo -u "$OE_USER" sed -i '/gevent==/d' "$OE_HOME_EXT/requirements.txt"
+sudo -u "$OE_USER" sed -i '/greenlet==/d' "$OE_HOME_EXT/requirements.txt"
+# Install the requirements
 sudo -u "$OE_USER" "$OE_HOME/venv/bin/pip" install -r "$OE_HOME_EXT/requirements.txt"
+# Restore the original requirements.txt
+sudo -u "$OE_USER" mv "$OE_HOME_EXT/requirements.txt.bak" "$OE_HOME_EXT/requirements.txt"
 
 if [ "$IS_ENTERPRISE" = "True" ]; then
     # Odoo Enterprise install!
