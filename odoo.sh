@@ -103,7 +103,11 @@ else
 fi
 
 echo -e "\n---- Create ODOO system user ----"
-sudo adduser --system --quiet --shell=/bin/bash --home="$OE_HOME" --gecos 'ODOO' --group "$OE_USER"
+if id "$OE_USER" >/dev/null 2>&1; then
+    echo "User $OE_USER already exists!"
+else
+    sudo adduser --system --quiet --shell=/bin/bash --home="$OE_HOME" --gecos 'ODOO' --group "$OE_USER"
+fi
 
 echo -e "\n---- Create Log directory ----"
 sudo mkdir -p /var/log/"$OE_USER"
@@ -113,11 +117,21 @@ sudo chown "$OE_USER":"$OE_USER" /var/log/"$OE_USER"
 # Install ODOO
 #--------------------------------------------------
 echo -e "\n==== Installing ODOO Server ===="
-sudo -u "$OE_USER" git clone --depth 1 --branch "$OE_VERSION" https://github.com/odoo/odoo "$OE_HOME_EXT/"
+if [ -d "$OE_HOME_EXT" ]; then
+    echo "Odoo directory already exists. Pulling latest changes..."
+    cd "$OE_HOME_EXT"
+    sudo -u "$OE_USER" git fetch --all
+    sudo -u "$OE_USER" git reset --hard origin/"$OE_VERSION"
+else
+    echo "Cloning Odoo from GitHub..."
+    sudo -u "$OE_USER" git clone --depth 1 --branch "$OE_VERSION" https://github.com/odoo/odoo "$OE_HOME_EXT/"
+fi
 
 # Create virtual environment with Python 3.10
 echo -e "\n---- Create virtual environment ----"
-sudo -u "$OE_USER" python3.10 -m venv "$OE_HOME/venv"
+if [ ! -d "$OE_HOME/venv" ]; then
+    sudo -u "$OE_USER" python3.10 -m venv "$OE_HOME/venv"
+fi
 
 echo -e "\n---- Upgrade pip, setuptools, wheel, and cython ----"
 sudo -u "$OE_USER" "$OE_HOME/venv/bin/pip" install --upgrade pip setuptools wheel cython
@@ -141,19 +155,30 @@ if [ "$IS_ENTERPRISE" = "True" ]; then
     sudo -H "$OE_HOME/venv/bin/pip" install psycopg2-binary pdfminer.six num2words ofxparse dbfread ebaysdk firebase_admin pyOpenSSL
     sudo npm install -g less less-plugin-clean-css
 
-    sudo -u "$OE_USER" mkdir -p "$OE_HOME/enterprise/addons"
+    if [ ! -d "$OE_HOME/enterprise/addons" ]; then
+        sudo -u "$OE_USER" mkdir -p "$OE_HOME/enterprise/addons"
+    fi
 
     echo "Please enter your GitHub credentials to clone the Odoo Enterprise repository:"
-    sudo -u "$OE_USER" git clone --depth 1 --branch "$OE_VERSION" https://github.com/odoo/enterprise "$OE_HOME/enterprise/addons" || {
-        echo "Failed to clone Odoo Enterprise repository. Exiting."
-        exit 1
-    }
+    if [ -d "$OE_HOME/enterprise/addons/.git" ]; then
+        echo "Enterprise addons directory already exists. Pulling latest changes..."
+        cd "$OE_HOME/enterprise/addons"
+        sudo -u "$OE_USER" git fetch --all
+        sudo -u "$OE_USER" git reset --hard origin/"$OE_VERSION"
+    else
+        sudo -u "$OE_USER" git clone --depth 1 --branch "$OE_VERSION" https://github.com/odoo/enterprise "$OE_HOME/enterprise/addons" || {
+            echo "Failed to clone Odoo Enterprise repository. Exiting."
+            exit 1
+        }
+    fi
 
     echo -e "\n---- Added Enterprise code under $OE_HOME/enterprise/addons ----"
 fi
 
 echo -e "\n---- Create custom module directory ----"
-sudo -u "$OE_USER" mkdir -p "$OE_HOME/custom/addons"
+if [ ! -d "$OE_HOME/custom/addons" ]; then
+    sudo -u "$OE_USER" mkdir -p "$OE_HOME/custom/addons"
+fi
 
 echo -e "\n---- Setting permissions on home folder ----"
 sudo chown -R "$OE_USER":"$OE_USER" "$OE_HOME/"
@@ -164,11 +189,12 @@ if [ "$GENERATE_RANDOM_PASSWORD" = "True" ]; then
     OE_SUPERADMIN=$(< /dev/urandom tr -dc A-Za-z0-9 | head -c16)
 fi
 
-sudo touch /etc/"${OE_CONFIG}".conf
-sudo chown "$OE_USER":"$OE_USER" /etc/"${OE_CONFIG}".conf
-sudo chmod 640 /etc/"${OE_CONFIG}".conf
+if [ ! -f "/etc/${OE_CONFIG}.conf" ]; then
+    sudo touch /etc/"${OE_CONFIG}".conf
+    sudo chown "$OE_USER":"$OE_USER" /etc/"${OE_CONFIG}".conf
+    sudo chmod 640 /etc/"${OE_CONFIG}".conf
 
-cat <<EOF | sudo tee /etc/"${OE_CONFIG}".conf
+    cat <<EOF | sudo tee /etc/"${OE_CONFIG}".conf
 [options]
 ; This is the password that allows database operations:
 admin_passwd = ${OE_SUPERADMIN}
@@ -176,17 +202,21 @@ http_port = ${OE_PORT}
 logfile = /var/log/${OE_USER}/${OE_CONFIG}.log
 EOF
 
-if [ "$IS_ENTERPRISE" = "True" ]; then
-    echo "addons_path=${OE_HOME}/enterprise/addons,${OE_HOME_EXT}/addons" | sudo tee -a /etc/"${OE_CONFIG}".conf
+    if [ "$IS_ENTERPRISE" = "True" ]; then
+        echo "addons_path=${OE_HOME}/enterprise/addons,${OE_HOME_EXT}/addons" | sudo tee -a /etc/"${OE_CONFIG}".conf
+    else
+        echo "addons_path=${OE_HOME_EXT}/addons,${OE_HOME}/custom/addons" | sudo tee -a /etc/"${OE_CONFIG}".conf
+    fi
 else
-    echo "addons_path=${OE_HOME_EXT}/addons,${OE_HOME}/custom/addons" | sudo tee -a /etc/"${OE_CONFIG}".conf
+    echo "Odoo configuration file already exists at /etc/${OE_CONFIG}.conf"
 fi
 
 #--------------------------------------------------
 # Create systemd unit file
 #--------------------------------------------------
 echo -e "* Creating systemd unit file"
-cat <<EOF | sudo tee /etc/systemd/system/"$OE_CONFIG".service
+if [ ! -f "/etc/systemd/system/${OE_CONFIG}.service" ]; then
+    cat <<EOF | sudo tee /etc/systemd/system/"$OE_CONFIG".service
 [Unit]
 Description=Odoo
 Requires=postgresql.service
@@ -203,10 +233,16 @@ StandardOutput=journal+console
 WantedBy=multi-user.target
 EOF
 
-echo -e "* Starting Odoo Service"
-sudo systemctl daemon-reload
-sudo systemctl enable "$OE_CONFIG"
-sudo systemctl start "$OE_CONFIG"
+    echo -e "* Starting Odoo Service"
+    sudo systemctl daemon-reload
+    sudo systemctl enable "$OE_CONFIG"
+    sudo systemctl start "$OE_CONFIG"
+else
+    echo "Systemd unit file already exists at /etc/systemd/system/${OE_CONFIG}.service"
+    echo -e "* Restarting Odoo Service"
+    sudo systemctl daemon-reload
+    sudo systemctl restart "$OE_CONFIG"
+fi
 
 #--------------------------------------------------
 # Install Nginx if needed
@@ -214,7 +250,8 @@ sudo systemctl start "$OE_CONFIG"
 if [ "$INSTALL_NGINX" = "True" ]; then
     echo -e "\n---- Installing and setting up Nginx ----"
     sudo apt install -y nginx
-    cat <<EOF | sudo tee /etc/nginx/sites-available/"$WEBSITE_NAME"
+    if [ ! -f "/etc/nginx/sites-available/${WEBSITE_NAME}" ]; then
+        cat <<EOF | sudo tee /etc/nginx/sites-available/"$WEBSITE_NAME"
 server {
     listen 80;
     server_name $WEBSITE_NAME;
@@ -263,11 +300,15 @@ server {
 }
 EOF
 
-    sudo ln -s /etc/nginx/sites-available/"$WEBSITE_NAME" /etc/nginx/sites-enabled/
-    sudo rm /etc/nginx/sites-enabled/default
-    sudo systemctl reload nginx
-    echo "proxy_mode = True" | sudo tee -a /etc/"${OE_CONFIG}".conf
-    echo "Done! The Nginx server is up and running. Configuration can be found at /etc/nginx/sites-available/$WEBSITE_NAME"
+        sudo ln -s /etc/nginx/sites-available/"$WEBSITE_NAME" /etc/nginx/sites-enabled/
+        sudo rm -f /etc/nginx/sites-enabled/default
+        sudo systemctl reload nginx
+        echo "proxy_mode = True" | sudo tee -a /etc/"${OE_CONFIG}".conf
+        echo "Done! The Nginx server is up and running. Configuration can be found at /etc/nginx/sites-available/$WEBSITE_NAME"
+    else
+        echo "Nginx configuration for $WEBSITE_NAME already exists."
+        sudo systemctl reload nginx
+    fi
 else
     echo "Nginx isn't installed due to choice of the user!"
 fi
