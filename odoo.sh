@@ -73,7 +73,6 @@ libxslt-dev libzip-dev libldap2-dev libsasl2-dev nodejs npm libjpeg-dev zlib1g-d
 libfreetype6-dev liblcms2-dev libwebp-dev libharfbuzz-dev libfribidi-dev libxcb1-dev
 
 echo -e "\n---- Install python packages/requirements ----"
-sudo -H pip3 install --upgrade pip
 sudo -H pip3 install -r "https://github.com/odoo/odoo/raw/${OE_VERSION}/requirements.txt"
 
 echo -e "\n---- Installing nodeJS NPM and rtlcss ----"
