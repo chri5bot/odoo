@@ -1,0 +1,487 @@
+#!/bin/bash
+################################################################################
+# Script for installing Odoo 17.0 on Ubuntu 22.04 LTS
+# Author: Yenthe Van Ginneken
+# Updated by: Chris Torres
+#-------------------------------------------------------------------------------
+# This script will install Odoo on your Ubuntu server. It can install multiple
+# Odoo instances on one Ubuntu because of the different xmlrpc_ports.
+#-------------------------------------------------------------------------------
+################################################################################
+
+# Exit on any error
+set -e
+
+#--------------------------------------------------
+# Configuration Variables
+#--------------------------------------------------
+OE_USER="odoo"
+OE_HOME="/home/$OE_USER"
+OE_HOME_EXT="$OE_HOME/${OE_USER}-server"
+INSTALL_WKHTMLTOPDF="True"
+OE_PORT="8069"
+OE_VERSION="17.0"
+IS_ENTERPRISE="False"
+INSTALL_POSTGRESQL_FOURTEEN="True"
+INSTALL_NGINX="True"
+OE_SUPERADMIN="admin"
+GENERATE_RANDOM_PASSWORD="True"
+OE_CONFIG="${OE_USER}-server"
+WEBSITE_NAME="_"
+LONGPOLLING_PORT="8072"
+ENABLE_SSL="True"
+ADMIN_EMAIL="chris.torres.dev@gmail.com"
+
+#--------------------------------------------------
+# Check Ubuntu version
+#--------------------------------------------------
+echo -e "\n---- Checking Ubuntu version ----"
+UBUNTU_VERSION=$(lsb_release -rs)
+if [[ "$UBUNTU_VERSION" != "22.04" ]]; then
+    echo "Warning: This script is optimized for Ubuntu 22.04 LTS."
+    echo "Detected version: $UBUNTU_VERSION"
+    read -p "Do you want to continue? (y/n) " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        exit 1
+    fi
+fi
+
+#--------------------------------------------------
+# Update Server
+#--------------------------------------------------
+echo -e "\n---- Update Server ----"
+sudo apt update
+sudo apt upgrade -y
+
+#--------------------------------------------------
+# Install Python 3.10 (included in Ubuntu 22.04)
+#--------------------------------------------------
+echo -e "\n---- Install Python 3.10 ----"
+# Ubuntu 22.04 comes with Python 3.10 by default
+sudo apt install -y python3 python3-venv python3-dev python3-pip
+
+#--------------------------------------------------
+# Install PostgreSQL Server
+#--------------------------------------------------
+echo -e "\n---- Install PostgreSQL Server ----"
+if [ "$INSTALL_POSTGRESQL_FOURTEEN" = "True" ]; then
+    echo -e "\n---- Installing PostgreSQL V14 ----"
+    sudo apt install -y wget ca-certificates curl gnupg lsb-release
+
+    # Modern way to add PostgreSQL repository (apt-key is deprecated)
+    sudo mkdir -p /etc/apt/keyrings
+    wget -qO - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg
+    echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+    sudo apt update
+    sudo apt install -y postgresql-14
+else
+    echo -e "\n---- Installing the default PostgreSQL version ----"
+    sudo apt install -y postgresql postgresql-client
+fi
+
+echo -e "\n---- Creating the ODOO PostgreSQL User ----"
+sudo -u postgres createuser -s "$OE_USER" 2>/dev/null || echo "PostgreSQL user $OE_USER already exists."
+
+#--------------------------------------------------
+# Install Dependencies
+#--------------------------------------------------
+echo -e "\n--- Installing required packages for Odoo 17.0 ---"
+sudo apt install -y git build-essential wget curl \
+    libxslt1-dev libzip-dev libldap2-dev libsasl2-dev \
+    libpq-dev libssl-dev libffi-dev \
+    libjpeg-dev zlib1g-dev libpng-dev \
+    libfreetype6-dev liblcms2-dev libwebp-dev \
+    libharfbuzz-dev libfribidi-dev libxcb1-dev \
+    libxml2-dev libxslt-dev \
+    nodejs npm
+
+echo -e "\n---- Installing rtlcss for RTL support ----"
+sudo npm install -g rtlcss
+
+#--------------------------------------------------
+# Install Wkhtmltopdf if needed
+#--------------------------------------------------
+if [ "$INSTALL_WKHTMLTOPDF" = "True" ]; then
+    echo -e "\n---- Install wkhtmltopdf ----"
+    # Ubuntu 22.04 has a compatible version in the repos
+    sudo apt install -y wkhtmltopdf
+else
+    echo "Wkhtmltopdf isn't installed due to the choice of the user!"
+fi
+
+#--------------------------------------------------
+# Create ODOO system user
+#--------------------------------------------------
+echo -e "\n---- Create ODOO system user ----"
+if id "$OE_USER" >/dev/null 2>&1; then
+    echo "User $OE_USER already exists!"
+else
+    sudo adduser --system --quiet --shell=/bin/bash --home="$OE_HOME" --gecos 'ODOO' --group "$OE_USER"
+    echo "User $OE_USER created successfully."
+fi
+
+#--------------------------------------------------
+# Create Log directory
+#--------------------------------------------------
+echo -e "\n---- Create Log directory ----"
+sudo mkdir -p /var/log/"$OE_USER"
+sudo chown "$OE_USER":"$OE_USER" /var/log/"$OE_USER"
+
+#--------------------------------------------------
+# Install ODOO
+#--------------------------------------------------
+echo -e "\n==== Installing ODOO Server ===="
+if [ -d "$OE_HOME_EXT" ]; then
+    echo "Odoo directory already exists. Pulling latest changes..."
+    cd "$OE_HOME_EXT"
+    sudo -u "$OE_USER" git fetch --all
+    sudo -u "$OE_USER" git reset --hard origin/"$OE_VERSION"
+else
+    echo "Cloning Odoo from GitHub..."
+    sudo -u "$OE_USER" git clone --depth 1 --branch "$OE_VERSION" https://github.com/odoo/odoo "$OE_HOME_EXT"
+fi
+
+#--------------------------------------------------
+# Create virtual environment with Python 3.10
+#--------------------------------------------------
+echo -e "\n---- Create virtual environment ----"
+if [ ! -d "$OE_HOME/venv" ]; then
+    sudo -u "$OE_USER" python3 -m venv "$OE_HOME/venv"
+    echo "Virtual environment created."
+else
+    echo "Virtual environment already exists."
+fi
+
+echo -e "\n---- Upgrade pip, setuptools, wheel, and cython ----"
+sudo -u "$OE_USER" "$OE_HOME/venv/bin/pip" install --upgrade pip setuptools wheel cython
+
+echo -e "\n---- Install compatible versions of gevent and greenlet for Odoo 17.0 ----"
+sudo -u "$OE_USER" "$OE_HOME/venv/bin/pip" install gevent==23.9.1 greenlet==3.0.1
+
+echo -e "\n---- Install remaining python packages/requirements ----"
+# Create a temporary requirements file without gevent and greenlet
+sudo -u "$OE_USER" cp "$OE_HOME_EXT/requirements.txt" "$OE_HOME/requirements_temp.txt"
+sudo -u "$OE_USER" sed -i '/^gevent/d' "$OE_HOME/requirements_temp.txt"
+sudo -u "$OE_USER" sed -i '/^greenlet/d' "$OE_HOME/requirements_temp.txt"
+
+# Install the requirements
+sudo -u "$OE_USER" "$OE_HOME/venv/bin/pip" install -r "$OE_HOME/requirements_temp.txt"
+
+# Clean up
+sudo -u "$OE_USER" rm "$OE_HOME/requirements_temp.txt"
+
+#--------------------------------------------------
+# Install Odoo Enterprise (if enabled)
+#--------------------------------------------------
+if [ "$IS_ENTERPRISE" = "True" ]; then
+    echo -e "\n---- Installing Odoo Enterprise dependencies ----"
+    sudo -u "$OE_USER" "$OE_HOME/venv/bin/pip" install psycopg2-binary pdfminer.six num2words ofxparse dbfread ebaysdk firebase_admin pyOpenSSL
+    sudo npm install -g less less-plugin-clean-css
+
+    if [ ! -d "$OE_HOME/enterprise/addons" ]; then
+        sudo -u "$OE_USER" mkdir -p "$OE_HOME/enterprise/addons"
+    fi
+
+    echo "Please enter your GitHub credentials to clone the Odoo Enterprise repository:"
+    if [ -d "$OE_HOME/enterprise/addons/.git" ]; then
+        echo "Enterprise addons directory already exists. Pulling latest changes..."
+        cd "$OE_HOME/enterprise/addons"
+        sudo -u "$OE_USER" git fetch --all
+        sudo -u "$OE_USER" git reset --hard origin/"$OE_VERSION"
+    else
+        sudo -u "$OE_USER" git clone --depth 1 --branch "$OE_VERSION" https://github.com/odoo/enterprise "$OE_HOME/enterprise/addons" || {
+            echo "Failed to clone Odoo Enterprise repository. Please check your credentials."
+            exit 1
+        }
+    fi
+
+    echo -e "\n---- Added Enterprise code under $OE_HOME/enterprise/addons ----"
+fi
+
+#--------------------------------------------------
+# Create custom module directory
+#--------------------------------------------------
+echo -e "\n---- Create custom module directory ----"
+if [ ! -d "$OE_HOME/custom/addons" ]; then
+    sudo -u "$OE_USER" mkdir -p "$OE_HOME/custom/addons"
+fi
+
+#--------------------------------------------------
+# Setting permissions on home folder
+#--------------------------------------------------
+echo -e "\n---- Setting permissions on home folder ----"
+sudo chown -R "$OE_USER":"$OE_USER" "$OE_HOME/"
+
+#--------------------------------------------------
+# Create server config file
+#--------------------------------------------------
+echo -e "\n---- Creating server config file ----"
+if [ "$GENERATE_RANDOM_PASSWORD" = "True" ]; then
+    echo -e "* Generating random admin password"
+    OE_SUPERADMIN=$(openssl rand -base64 16 | tr -dc 'A-Za-z0-9' | head -c16)
+fi
+
+if [ ! -f "/etc/${OE_CONFIG}.conf" ]; then
+    sudo touch /etc/"${OE_CONFIG}".conf
+    sudo chown "$OE_USER":"$OE_USER" /etc/"${OE_CONFIG}".conf
+    sudo chmod 640 /etc/"${OE_CONFIG}".conf
+
+    cat <<EOF | sudo tee /etc/"${OE_CONFIG}".conf
+[options]
+; This is the password that allows database operations:
+admin_passwd = ${OE_SUPERADMIN}
+http_port = ${OE_PORT}
+logfile = /var/log/${OE_USER}/${OE_CONFIG}.log
+limit_memory_hard = 2684354560
+limit_memory_soft = 2147483648
+limit_time_cpu = 600
+limit_time_real = 1200
+max_cron_threads = 1
+workers = 2
+EOF
+
+    if [ "$IS_ENTERPRISE" = "True" ]; then
+        echo "addons_path=${OE_HOME}/enterprise/addons,${OE_HOME_EXT}/addons,${OE_HOME}/custom/addons" | sudo tee -a /etc/"${OE_CONFIG}".conf
+    else
+        echo "addons_path=${OE_HOME_EXT}/addons,${OE_HOME}/custom/addons" | sudo tee -a /etc/"${OE_CONFIG}".conf
+    fi
+else
+    echo "Odoo configuration file already exists at /etc/${OE_CONFIG}.conf"
+fi
+
+#--------------------------------------------------
+# Create systemd unit file
+#--------------------------------------------------
+echo -e "\n---- Creating systemd unit file ----"
+if [ ! -f "/etc/systemd/system/${OE_CONFIG}.service" ]; then
+    cat <<EOF | sudo tee /etc/systemd/system/"$OE_CONFIG".service
+[Unit]
+Description=Odoo 17.0
+Documentation=https://www.odoo.com
+Requires=postgresql.service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=${OE_USER}
+Group=${OE_USER}
+ExecStart=${OE_HOME}/venv/bin/python ${OE_HOME_EXT}/odoo-bin --config=/etc/${OE_CONFIG}.conf
+WorkingDirectory=${OE_HOME_EXT}
+StandardOutput=journal+console
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    echo -e "* Enabling and starting Odoo Service"
+    sudo systemctl daemon-reload
+    sudo systemctl enable "$OE_CONFIG"
+    sudo systemctl start "$OE_CONFIG"
+else
+    echo "Systemd unit file already exists at /etc/systemd/system/${OE_CONFIG}.service"
+    echo -e "* Restarting Odoo Service"
+    sudo systemctl daemon-reload
+    sudo systemctl restart "$OE_CONFIG"
+fi
+
+#--------------------------------------------------
+# Install Nginx if needed
+#--------------------------------------------------
+if [ "$INSTALL_NGINX" = "True" ]; then
+    echo -e "\n---- Installing and setting up Nginx ----"
+    sudo apt install -y nginx
+
+    if [ "$WEBSITE_NAME" = "_" ]; then
+        echo "Warning: WEBSITE_NAME is set to '_' (catch-all). SSL will not be configured."
+        echo "Update WEBSITE_NAME to your domain name if you want SSL."
+    fi
+
+    if [ ! -f "/etc/nginx/sites-available/${WEBSITE_NAME}" ]; then
+        cat <<EOF | sudo tee /etc/nginx/sites-available/"$WEBSITE_NAME"
+#odoo server
+upstream odoo {
+    server 127.0.0.1:${OE_PORT};
+}
+
+upstream odoochat {
+    server 127.0.0.1:${LONGPOLLING_PORT};
+}
+
+# HTTP -> HTTPS redirect (uncomment when SSL is enabled)
+# server {
+#     listen 80;
+#     server_name ${WEBSITE_NAME};
+#     return 301 https://\$host\$request_uri;
+# }
+
+server {
+    listen 80;
+    server_name ${WEBSITE_NAME};
+
+    proxy_read_timeout 720s;
+    proxy_connect_timeout 720s;
+    proxy_send_timeout 720s;
+
+    # Proxy headers
+    proxy_set_header X-Forwarded-Host \$host;
+    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto \$scheme;
+    proxy_set_header X-Real-IP \$remote_addr;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-XSS-Protection "1; mode=block";
+    add_header X-Content-Type-Options "nosniff";
+
+    # Log files
+    access_log /var/log/nginx/${OE_USER}-access.log;
+    error_log /var/log/nginx/${OE_USER}-error.log;
+
+    # Increase proxy buffer size
+    proxy_buffers 16 64k;
+    proxy_buffer_size 128k;
+
+    # Allow large file uploads
+    client_max_body_size 100m;
+
+    # Odoo backend
+    location / {
+        proxy_pass http://odoo;
+        proxy_redirect off;
+    }
+
+    # Longpolling
+    location /longpolling {
+        proxy_pass http://odoochat;
+    }
+
+    # Cache static files (fixed regex)
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 2d;
+        proxy_pass http://odoo;
+        add_header Cache-Control "public, no-transform";
+    }
+
+    # Gzip compression
+    gzip on;
+    gzip_min_length 1100;
+    gzip_buffers 4 32k;
+    gzip_types text/css text/plain text/xml application/xml application/javascript application/json image/svg+xml;
+    gzip_vary on;
+}
+EOF
+
+        sudo ln -sf /etc/nginx/sites-available/"$WEBSITE_NAME" /etc/nginx/sites-enabled/
+        sudo rm -f /etc/nginx/sites-enabled/default
+
+        # Test nginx configuration
+        sudo nginx -t && sudo systemctl reload nginx
+
+        echo "proxy_mode = True" | sudo tee -a /etc/"${OE_CONFIG}".conf
+        echo "Done! Nginx is configured at /etc/nginx/sites-available/$WEBSITE_NAME"
+    else
+        echo "Nginx configuration for $WEBSITE_NAME already exists."
+        sudo nginx -t && sudo systemctl reload nginx
+    fi
+else
+    echo "Nginx isn't installed due to choice of the user!"
+fi
+
+#--------------------------------------------------
+# Enable SSL with Certbot
+#--------------------------------------------------
+if [ "$INSTALL_NGINX" = "True" ] && [ "$ENABLE_SSL" = "True" ] && [ "$ADMIN_EMAIL" != "odoo@example.com" ] && [ "$WEBSITE_NAME" != "_" ]; then
+    echo -e "\n---- Installing and configuring SSL with Certbot ----"
+    sudo apt update -y
+    sudo apt install -y snapd
+    sudo snap install core
+    sudo snap refresh core
+    sudo snap install --classic certbot
+
+    # Create symlink (use -sf to force if exists)
+    sudo ln -sf /snap/bin/certbot /usr/bin/certbot
+
+    # Obtain and install certificate
+    sudo certbot --nginx -d "$WEBSITE_NAME" --noninteractive --agree-tos --email "$ADMIN_EMAIL" --redirect
+
+    sudo systemctl reload nginx
+    echo "SSL/HTTPS is enabled for $WEBSITE_NAME!"
+else
+    echo -e "\n---- SSL/HTTPS Configuration ----"
+    if [ "$ENABLE_SSL" != "True" ]; then
+        echo "SSL is disabled by user configuration."
+    elif [ "$ADMIN_EMAIL" = "odoo@example.com" ]; then
+        echo "Certbot requires a valid email address. Please update ADMIN_EMAIL."
+    elif [ "$WEBSITE_NAME" = "_" ]; then
+        echo "Cannot obtain SSL Certificate for '_'. Set WEBSITE_NAME to your domain."
+    fi
+fi
+
+#--------------------------------------------------
+# Final restart and summary
+#--------------------------------------------------
+echo -e "\n---- Starting Odoo Service ----"
+sudo systemctl restart "$OE_CONFIG"
+
+# Wait for service to start
+sleep 3
+
+# Check if service is running
+if sudo systemctl is-active --quiet "$OE_CONFIG"; then
+    SERVICE_STATUS="✅ Running"
+else
+    SERVICE_STATUS="❌ Failed (check: sudo journalctl -u $OE_CONFIG -f)"
+fi
+
+echo ""
+echo "==========================================================="
+echo "                    INSTALLATION COMPLETE                   "
+echo "==========================================================="
+echo ""
+echo "Odoo Service Status: $SERVICE_STATUS"
+echo ""
+echo "-----------------------------------------------------------"
+echo "Configuration Details:"
+echo "-----------------------------------------------------------"
+echo "  Odoo Version:        $OE_VERSION"
+echo "  Port:                $OE_PORT"
+echo "  User:                $OE_USER"
+echo "  Config file:         /etc/${OE_CONFIG}.conf"
+echo "  Log file:            /var/log/$OE_USER/${OE_CONFIG}.log"
+echo "  Code location:       $OE_HOME_EXT/"
+echo "  Custom addons:       $OE_HOME/custom/addons/"
+echo "  Virtual environment: $OE_HOME/venv/"
+echo ""
+echo "-----------------------------------------------------------"
+echo "Database Details:"
+echo "-----------------------------------------------------------"
+echo "  PostgreSQL User:     $OE_USER"
+echo "  Master Password:     $OE_SUPERADMIN"
+echo ""
+echo "-----------------------------------------------------------"
+echo "Service Commands:"
+echo "-----------------------------------------------------------"
+echo "  Start:    sudo systemctl start $OE_CONFIG"
+echo "  Stop:     sudo systemctl stop $OE_CONFIG"
+echo "  Restart:  sudo systemctl restart $OE_CONFIG"
+echo "  Status:   sudo systemctl status $OE_CONFIG"
+echo "  Logs:     sudo journalctl -u $OE_CONFIG -f"
+echo ""
+if [ "$INSTALL_NGINX" = "True" ]; then
+    echo "-----------------------------------------------------------"
+    echo "Nginx Configuration:"
+    echo "-----------------------------------------------------------"
+    echo "  Config file:         /etc/nginx/sites-available/$WEBSITE_NAME"
+    if [ "$WEBSITE_NAME" != "_" ]; then
+        echo "  URL:                 http://$WEBSITE_NAME"
+    else
+        echo "  URL:                 http://YOUR_SERVER_IP"
+    fi
+    echo ""
+fi
+echo "==========================================================="
+echo "  Access Odoo at: http://YOUR_SERVER_IP:$OE_PORT"
+echo "==========================================================="
