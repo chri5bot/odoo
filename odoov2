@@ -100,12 +100,43 @@ echo -e "\n---- Installing rtlcss for RTL support ----"
 sudo npm install -g rtlcss
 
 #--------------------------------------------------
-# Install Wkhtmltopdf if needed
+# Install Wkhtmltopdf (patched Qt) — required for Odoo 17 PDF reports (header/logo)
+# Do NOT use apt install wkhtmltopdf: that build is unpatched and breaks PDF layout.
 #--------------------------------------------------
 if [ "$INSTALL_WKHTMLTOPDF" = "True" ]; then
-    echo -e "\n---- Install wkhtmltopdf ----"
-    # Ubuntu 22.04 has a compatible version in the repos
-    sudo apt install -y wkhtmltopdf
+    echo -e "\n---- Install wkhtmltopdf 0.12.6.1-3 (patched Qt) for Odoo 17 ----"
+    WKHTML_VERSION="0.12.6.1-3"
+    WKHTML_BASE_URL="https://github.com/wkhtmltopdf/packaging/releases/download/${WKHTML_VERSION}"
+    # Ubuntu 22.04 = jammy; 20.04 = focal
+    WKHTML_CODENAME="jammy"
+    [ -f /etc/os-release ] && . /etc/os-release
+    case "${VERSION_CODENAME:-}" in
+        focal) WKHTML_CODENAME=focal ;;
+        jammy|noble) WKHTML_CODENAME=jammy ;;
+    esac
+    WKHTML_ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+    case "$WKHTML_ARCH" in
+        amd64|x86_64) WKHTML_ARCH=amd64 ;;
+        arm64|aarch64) WKHTML_ARCH=arm64 ;;
+        *) WKHTML_ARCH=amd64 ;;
+    esac
+    WKHTML_DEB="wkhtmltox_${WKHTML_VERSION}.${WKHTML_CODENAME}_${WKHTML_ARCH}.deb"
+    if command -v wkhtmltopdf &>/dev/null && wkhtmltopdf --version 2>/dev/null | grep -q "patched"; then
+        echo "wkhtmltopdf (patched Qt) already installed: $(wkhtmltopdf --version 2>/dev/null | head -1)"
+    else
+        TMP_WKHTML=$(mktemp -d)
+        if wget -q "$WKHTML_BASE_URL/$WKHTML_DEB" -O "$TMP_WKHTML/$WKHTML_DEB"; then
+            sudo dpkg -i "$TMP_WKHTML/$WKHTML_DEB" || true
+            sudo apt-get install -f -y
+            [ -x /usr/local/bin/wkhtmltopdf ] && [ ! -L /usr/bin/wkhtmltopdf ] && sudo ln -sf /usr/local/bin/wkhtmltopdf /usr/bin/wkhtmltopdf
+            [ -x /usr/local/bin/wkhtmltoimage ] && [ ! -L /usr/bin/wkhtmltoimage ] && sudo ln -sf /usr/local/bin/wkhtmltoimage /usr/bin/wkhtmltoimage
+            echo "Installed: $(wkhtmltopdf --version 2>/dev/null | head -1)"
+        else
+            echo "Warning: could not download $WKHTML_DEB; falling back to apt (PDF header may not show)."
+            sudo apt install -y wkhtmltopdf
+        fi
+        rm -rf "$TMP_WKHTML"
+    fi
 else
     echo "Wkhtmltopdf isn't installed due to the choice of the user!"
 fi
